@@ -303,7 +303,7 @@ try:
 
         st.write("")
         
-        col1, col2 = st.columns(3)
+        col1, col2 = st.columns(2)
         col1.metric("Wycena Portfela (PLN)", f"{total_value_stocks + total_free_cash:,.2f} zł")
         col2.metric("Wolne srodki (PLN)", f"{total_free_cash:,.2f} zł")
 
