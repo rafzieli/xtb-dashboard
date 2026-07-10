@@ -317,12 +317,12 @@ try:
         fig_line = go.Figure()
         fig_line.add_trace(go.Scatter(
             x=timeline_df["Time"], y=timeline_df["Wpłaty Rzeczywiste (Wkład Netto)"],
-            mode='lines', name='Twój Realny Wkład (Wpłaty Netto)',
+            mode='lines+markers', name='Twój Realny Wkład (Wpłaty Netto)',
             line=dict(color='rgba(150, 150, 150, 0.8)', width=2, dash='dash')
         ))
         fig_line.add_trace(go.Scatter(
             x=timeline_df["Time"], y=timeline_df["Realna Wartość Portfela"],
-            mode='lines', name='Rynkowa Wartość (Akcje + Gotówka)',
+            mode='lines+markers', name='Rynkowa Wartość (Akcje + Gotówka)',
             line=dict(color='#cc0000' if total_gain_pln < 0 else '#2ca02c', width=3)
         ))
         
