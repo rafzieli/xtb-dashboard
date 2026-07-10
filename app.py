@@ -295,11 +295,19 @@ try:
 
         st.write("") # Kosmetyczny odstęp pionowy między wierszami
 
-        # Wiersz 2: Zyski i zwroty (3 równe kolumny)
-        row2_col1, row2_col2, row2_col3 = st.columns(3)
+        # Wiersz 2: Zyski, zwroty + Przycisk odświeżania (4 równe kolumny)
+        row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
         row2_col1.metric("Łączny Wynik Portfela", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
         row2_col2.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
         row2_col3.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
+        
+        # 🔄 Kolumna z przyciskiem odświeżania danych
+        with row2_col4:
+            st.write("") # Dwa wolne wiersze, żeby wyrównać przycisk w dół do poziomu metryk
+            st.write("")
+            if st.button("🔄 Odśwież dane", use_container_width=True):
+                st.cache_data.clear() # Czyszczenie pamięci podręcznej (wymusi ponowne pobranie z Drive / Yahoo)
+                st.rerun()           # Przeładowanie skryptu
 
         st.markdown("---")
 
