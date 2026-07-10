@@ -13,9 +13,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # --- SET CONFIGURATION ---
-st.set_page_config(page_title="XTB Dashboard PLN", page_icon="💰", layout="wide")
+st.set_page_config(page_title="XTB Dashboard", page_icon="💰", layout="wide")
 
-st.title("💰 Prywatny Dashboard Finansowy XTB (Portfel PLN)")
+st.title("💰 Prywatny Dashboard Finansowy XTB")
 st.markdown("---")
 
 # --- BACKEND LOGIC ---
@@ -34,10 +34,7 @@ def parse_xtb_comment(row: pd.Series) -> tuple:
 
 def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     asset_types = ["Stock purchase", "Stock sell"]
-    # FILTR: Ignorujemy spółki z USA, zostawiamy tylko giełdę PLN/EUR obecną na subkoncie PLN
     trade_df = df[df["Type"].isin(asset_types)].copy()
-    trade_df = trade_df[~trade_df["Ticker"].str.endswith(".US", na=False)]
-    
     if trade_df.empty: 
         return pd.DataFrame(), 0.0
     
@@ -64,6 +61,7 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
 
 def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     if not isinstance(xtb_ticker, str): return xtb_ticker
+    if xtb_ticker.endswith(".US"): return xtb_ticker.replace(".US", "")
     if xtb_ticker.endswith(".PL"): return xtb_ticker.replace(".PL", ".WA")
     if "." not in xtb_ticker: return f"{xtb_ticker}.WA"
     return xtb_ticker
@@ -110,28 +108,25 @@ def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
             if not hist_fx.empty:
                 fx_rates[curr] = float(hist_fx["Close"].iloc[-1])
             else:
-                fx_rates[curr] = 4.30
+                fx_rates[curr] = 4.00 if curr == "USD" else 4.30
         except:
-            fx_rates[curr] = 4.30
+            fx_rates[curr] = 4.00 if curr == "USD" else 4.30
 
     updated_portfolio["FX_Rate"] = updated_portfolio["Asset_Currency"].map(fx_rates).fillna(1.0)
     updated_portfolio["Current_Value_PLN"] = updated_portfolio["Current_Value_Native"] * updated_portfolio["FX_Rate"]
     return updated_portfolio
 
 def calculate_cash_stats(df: pd.DataFrame) -> dict:
-    # 100% ODZWIERCIEDLENIE LOGIKI UŻYTKOWNIKA: Wpłaty minus transfery na USD
+    # Wpłaty Deposit pomniejszone o Transfery PLN to USD
     deposits_only = df[df["Type"] == "Deposit"]["Amount"].sum()
     to_usd_transfers = df[(df["Type"] == "Transfer") & (df["Comment"].str.contains("PLN to USD", na=False, case=False))]["Amount"].sum()
     
-    # Ponieważ to_usd_transfers jest wartością ujemną, dodanie jej odejmuje te środki od wkładu PLN
     real_pln_deposits = deposits_only + to_usd_transfers
     
-    # Filtrujemy też dywidendy i odsetki pod kątem subkonta PLN (pomijamy te przypisane do .US w komentarzu)
-    div_gross = df[(df["Type"] == "Dividend") & (~df["Comment"].str.contains(r"\b\w+\.US\b", na=False))]["Amount"].sum()
-    wht_tax = df[(df["Type"] == "Withholding tax") & (~df["Comment"].str.contains(r"\b\w+\.US\b", na=False))]["Amount"].sum()
+    div_gross = df[df["Type"] == "Dividend"]["Amount"].sum()
+    wht_tax = df[df["Type"] == "Withholding tax"]["Amount"].sum()
     interest = df[df["Type"] == "Free funds interest"]["Amount"].sum()
     interest_tax = df[df["Type"] == "Free funds interest tax"]["Amount"].sum()
-    
     return {
         "deposits": real_pln_deposits,
         "dividends": div_gross + wht_tax,
@@ -140,7 +135,7 @@ def calculate_cash_stats(df: pd.DataFrame) -> dict:
 
 @st.cache_data(ttl=3600)
 def generate_weekly_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
-    """Generates a weekly timeline focused STRICTLY on the PLN subaccount."""
+    """Generates a weekly timeline including ALL stocks (.US too) but tracking PLN net deposits."""
     df_sorted = df.copy()
     df_sorted["Time"] = pd.to_datetime(df_sorted["Time"])
     df_sorted = df_sorted.sort_values(by="Time")
@@ -154,8 +149,6 @@ def generate_weekly_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
 
     asset_types = ["Stock purchase", "Stock sell"]
     trade_df = df_sorted[df_sorted["Type"].isin(asset_types)].copy()
-    # EFEKT OSOBNEGO PORTFELA: wyrzucamy transakcje giełdy US z osi czasu PLN
-    trade_df = trade_df[~trade_df["Ticker"].str.endswith(".US", na=False)]
     
     if not trade_df.empty:
         parsed_data = trade_df.apply(parse_xtb_comment, axis=1)
@@ -183,12 +176,12 @@ def generate_weekly_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
     for current_day in weekly_range:
         sub_df = df_sorted[df_sorted["Time"].dt.date <= current_day]
         
-        # Wkład PLN netto: Wpłaty PLN minus transfery wychodzące na USD
+        # Wkład netto na dany tydzień (Wpłaty minus transfery PLN to USD)
         dep_day = sub_df[sub_df["Type"] == "Deposit"]["Amount"].sum()
         trans_day = sub_df[(sub_df["Type"] == "Transfer") & (sub_df["Comment"].str.contains("PLN to USD", na=False, case=False))]["Amount"].sum()
         net_deposits_day = dep_day + trans_day
         
-        # Saldo gotówkowe na subkoncie PLN (z uwzględnieniem faktu, że kasa wyszła na USD)
+        # Saldo gotówki w XTB
         cash_balance = sub_df["Amount"].sum()
         
         stock_value_pln = 0.0
@@ -208,18 +201,21 @@ def generate_weekly_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
                         if pd.isna(price) or price is None:
                             price = sub_trades[sub_trades["Yahoo_Ticker"] == t_symbol]["Price"].iloc[-1]
                         
+                        # Przelicznik walutowy dla wyceny historycznej akcji
                         fx_rate = 1.0
-                        if not t_symbol.endswith(".WA"): fx_rate = 4.30 # Np. spółki w EUR na koncie PLN
+                        if t_symbol.endswith(".US") or ("." not in t_symbol and not t_symbol.endswith(".WA")): 
+                            fx_rate = 4.00
+                        elif not t_symbol.endswith(".WA"): 
+                            fx_rate = 4.30
                         
                         stock_value_pln += shares * price * fx_rate
                         
-        # Realna wartość portfela PLN
         total_portfolio_value = cash_balance + stock_value_pln
         
         timeline_records.append({
             "Time": current_day,
-            "Wpłaty PLN (Wkład Netto)": net_deposits_day,
-            "Wartość Portfela PLN (Rynek)": total_portfolio_value
+            "Wpłaty Rzeczywiste (Wkład Netto)": net_deposits_day,
+            "Realna Wartość Portfela": total_portfolio_value
         })
         
     return pd.DataFrame(timeline_records)
@@ -229,7 +225,7 @@ try:
     GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
     DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
 
-    with st.spinner("Generowanie czystego profilu subkonta PLN..."):
+    with st.spinner("Przetwarzanie pełnego portfela (PLN + US)..."):
         response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
 
     if response.status_code == 200:
@@ -237,7 +233,7 @@ try:
         raw_df.columns = raw_df.columns.str.strip()
         clean_df = raw_df.dropna(subset=["ID"])
 
-        # Obliczenia bazowe przefiltrowane na PLN
+        # Obliczenia bazowe
         base_portfolio, realized_pnl = calculate_accurate_portfolio(clean_df)
         final_portfolio = fetch_market_and_fx_data(base_portfolio)
         cash = calculate_cash_stats(clean_df)
@@ -249,26 +245,26 @@ try:
 
         # --- PANEL METRYK ---
         col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Wycena Akcji PLN (Giełda)", f"{total_value_stocks:,.2f} zł")
-        col2.metric("Wkład Netto w PLN", f"{cash['deposits']:,.2f} zł")
-        col3.metric("Zrealizowany Zysk PLN 🟢", f"{realized_pnl:,.2f} zł")
-        col4.metric("Dywidendy + Odsetki PLN", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
-        col5.metric("Wynik Portfela PLN", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
+        col1.metric("Wycena Akcji (PLN)", f"{total_value_stocks:,.2f} zł")
+        col2.metric("Suma Twoich Wpłat Netto", f"{cash['deposits']:,.2f} zł")
+        col3.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
+        col4.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
+        col5.metric("Łączny Wynik Portfela", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
 
         st.markdown("---")
 
-        # --- WYKRES LINIOWY ---
-        st.subheader("📈 Realna zmiana wartości portfela PLN vs Twój wkład")
+        # --- WYKRES LINIOWY (TYGODNIOWY) ---
+        st.subheader("📈 Realna zmiana wartości portfela w czasie vs Twoje wpłaty")
         
         fig_line = go.Figure()
         fig_line.add_trace(go.Scatter(
-            x=timeline_df["Time"], y=timeline_df["Wpłaty PLN (Wkład Netto)"],
-            mode='lines', name='Twój Wkład (Wpłaty PLN Netto)',
+            x=timeline_df["Time"], y=timeline_df["Wpłaty Rzeczywiste (Wkład Netto)"],
+            mode='lines', name='Twój Realny Wkład (Wpłaty Netto)',
             line=dict(color='rgba(150, 150, 150, 0.8)', width=2, dash='dash')
         ))
         fig_line.add_trace(go.Scatter(
-            x=timeline_df["Time"], y=timeline_df["Wartość Portfela PLN (Rynek)"],
-            mode='lines', name='Wartość Portfela PLN (Akcje + Gotówka)',
+            x=timeline_df["Time"], y=timeline_df["Realna Wartość Portfela"],
+            mode='lines', name='Rynkowa Wartość (Akcje + Gotówka)',
             line=dict(color='#cc0000' if total_gain_pln < 0 else '#2ca02c', width=3)
         ))
         
@@ -286,7 +282,7 @@ try:
         # --- WYKRESY STRUKTURY ---
         chart_col1, chart_col2 = st.columns(2)
         with chart_col1:
-            st.subheader("Struktura Portfela PLN")
+            st.subheader("Struktura Portfela")
             if not final_portfolio.empty:
                 fig_pie = px.pie(final_portfolio, values="Current_Value_PLN", names="Ticker", hole=0.4,
                                  color_discrete_sequence=px.colors.sequential.RdBu)
@@ -302,7 +298,7 @@ try:
                 st.plotly_chart(fig_bar, use_container_width=True)
 
         # --- TABELA ---
-        st.subheader("📋 Szczegóły Twoich Pozycji (PLN)")
+        st.subheader("📋 Szczegóły Twoich Pozycji")
         if not final_portfolio.empty:
             st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], use_container_width=True)
 
@@ -310,5 +306,5 @@ try:
         st.error(f"Błąd Dysku Google. Status: {response.status_code}")
 
 except Exception as e:
-    st.error("💥 Wystąpił błąd podczas generowania dashboardu PLN.")
+    st.error("💥 Wystąpił błąd podczas generowania kompletnego dashboardu.")
     st.exception(e)
