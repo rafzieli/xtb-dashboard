@@ -32,70 +32,33 @@ def parse_xtb_comment(row: pd.Series) -> tuple:
         elif tx_type == "Stock sell": return -volume, price
     return None, None
 
-def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
-    asset_types = ["Stock purchase", "Stock sell"]
-    trade_df = df[df["Type"].isin(asset_types)].copy()
-    if trade_df.empty: 
-        return pd.DataFrame(), 0.0
+def calculate_accurate_portfolio(df_closed: pd.DataFrame, df_cash: pd.DataFrame) -> tuple:
+    # 1. Zysk z zamkniętych pozycji giełdowych (z pliku Closed Positions)
+    realized_pnl_stocks = df_closed["Profit/Loss"].sum()
     
-    # Czyszczenie i ujednolicenie tickerów, żeby grupy były idealne
-    trade_df["Ticker"] = trade_df["Ticker"].str.strip().str.upper()
+    # 2. Dodajemy inne operacje z pliku Cash Operations:
+    # Dywidendy (dodatnie), Podatki (ujemne), Odsetki (dodatnie)
+    other_gains = df_cash[df_cash["Type"].isin([
+        "Dividend", "Withholding tax", "Free funds interest", "Free funds interest tax"
+    ])]["Amount"].sum()
     
-    parsed_data = trade_df.apply(parse_xtb_comment, axis=1)
-    trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
-    trade_df["Price"] = [x[1] if x is not None else None for x in parsed_data]
+    # Całkowity zrealizowany wynik to suma giełdowa + dywidendy/podatki/odsetki
+    total_realized_pnl = realized_pnl_stocks + other_gains
     
-    realized_pnl = 0.0
-    
-    # Precyzyjne rozliczenie FIFO dla każdego tickera z osobna
-    for ticker, group in trade_df.groupby("Ticker"):
-        buy_queue = []
-        group_sorted = group.sort_values(by="Time")
-        
-        for idx, row in group_sorted.iterrows():
-            vol = row["Volume_Adjusted"]
-            amount = row["Amount"]
-            
-            if row["Type"] == "Stock purchase" and vol is not None:
-                # Zapisujemy ilość i faktycznie wydaną kwotę PLN (jako wartość dodatnią do kosztu)
-                buy_queue.append({"vol": vol, "total_cost": abs(amount)})
-                
-            elif row["Type"] == "Stock sell" and vol is not None:
-                sell_vol = abs(vol)
-                revenue = amount # Przychód ze sprzedaży (dodatni)
-                matched_cost = 0.0
-                
-                # Pobieramy koszt z kolejki zakupów
-                while sell_vol > 0.000001 and len(buy_queue) > 0:
-                    current_buy = buy_queue[0]
-                    if current_buy["vol"] <= sell_vol + 0.000001:
-                        # Wykorzystujemy cały ten zakup
-                        matched_cost += current_buy["total_cost"]
-                        sell_vol -= current_buy["vol"]
-                        buy_queue.pop(0)
-                    else:
-                        # Wykorzystujemy część tego zakupu
-                        proporcja = sell_vol / current_buy["vol"]
-                        matched_cost += current_buy["total_cost"] * proporcja
-                        current_buy["total_cost"] -= current_buy["total_cost"] * proporcja
-                        current_buy["vol"] -= sell_vol
-                        sell_vol = 0
-                
-                # Zysk = Przychód - Koszt zakupu danej transakcji
-                realized_pnl += (revenue - matched_cost)
-
-    # Budujemy aktywny portfel na sam koniec
-    portfolio = trade_df.groupby("Ticker").agg(
-        Shares_Owned=("Volume_Adjusted", "sum"),
+    # 3. Aktywne pozycje (do tabeli i struktury)
+    # Wybieramy tylko te, które w Twoim pliku są "OPEN" lub jeszcze nie zostały w całości zamknięte
+    # Wartość inwestycji to suma "Amount" z "Cash Operations" dla aktywnych tickerów
+    active_mask = df_cash["Type"] == "Stock purchase"
+    active_df = df_cash[active_mask].groupby("Ticker").agg(
         Net_Cash_Flow=("Amount", "sum")
     ).reset_index()
     
-    # Jeśli zostają mikro-ochłapy przez zaokrąglenia XTB (np. mniej niż 0.0001 akcji), czyścimy do zera
-    portfolio["Shares_Owned"] = portfolio["Shares_Owned"].round(6)
-    active_portfolio = portfolio[portfolio["Shares_Owned"] > 0.0001].copy()
+    # Proste założenie: jeśli suma przepływów jest ujemna, to masz akcje (bo kupowałeś)
+    active_portfolio = active_df[active_df["Net_Cash_Flow"] < 0].copy()
     active_portfolio["Total_Invested_Raw"] = -active_portfolio["Net_Cash_Flow"]
-
-    return active_portfolio.drop(columns=["Net_Cash_Flow"]), round(realized_pnl, 2)
+    active_portfolio = active_portfolio.rename(columns={"Ticker": "Ticker"})
+    
+    return active_portfolio, round(total_realized_pnl, 2)
 
 def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     if not isinstance(xtb_ticker, str): return xtb_ticker
