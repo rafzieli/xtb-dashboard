@@ -105,28 +105,35 @@ def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     return xtb_ticker
 
 @st.cache_data(ttl=1800)
-@st.cache_data(ttl=1800) # Wydłużamy TTL do 30 min, żeby apka nie mielił ciągle
-def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
-    if portfolio_df.empty: return portfolio_df
+ef fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
+    if dportfolio_df.empty: return portfolio_df
     updated_portfolio = portfolio_df.copy()
     updated_portfolio["Yahoo_Ticker"] = updated_portfolio["Ticker"].apply(fix_ticker_for_yahoo)
     
-    tickers = updated_portfolio["Yahoo_Ticker"].unique().tolist()
+    current_prices, currencies = {}, {}
+    tickers_to_fetch = updated_portfolio["Yahoo_Ticker"].unique()
     
-    # POBIERANIE ZBIORCZE - Zamiast pętli!
-    data = yf.download(tickers, period="1d", group_by='ticker', threads=True, progress=False)
-    
-    current_prices = {}
-    for t in tickers:
+    for y_ticker in tickers_to_fetch:
         try:
-            # Obsługa różnej struktury danych przy 1 vs wielu tickerach
-            ticker_data = data[t] if len(tickers) > 1 else data
-            price = ticker_data["Close"].iloc[-1]
-            current_prices[t] = float(price)
-        except:
-            current_prices[t] = 0.0
+            t = yf.Ticker(y_ticker)
+            hist = t.history(period="1d", timeout=3)
+            if not hist.empty:
+                price = hist["Close"].iloc[-1]
+            else:
+                price = t.info.get("previousClose") or t.info.get("regularMarketPrice")
+            currency = t.info.get("currency", "USD")
+            if price is not None and currency in ["ILA", "GBX"] and y_ticker.endswith(".WA"):
+                price /= 100.0
+                currency = "PLN"
+            current_prices[y_ticker] = price
+            currencies[y_ticker] = currency
+        except Exception as e:
+            logger.error(f"Error fetching {y_ticker}: {e}")
+            current_prices[y_ticker], currencies[y_ticker] = None, "USD"
 
     updated_portfolio["Current_Price"] = updated_portfolio["Yahoo_Ticker"].map(current_prices)
+    updated_portfolio["Asset_Currency"] = updated_portfolio["Yahoo_Ticker"].map(currencies).fillna("USD")
+    updated_portfolio["Current_Value_Native"] = updated_portfolio["Shares_Owned"] * updated_portfolio["Current_Price"]
     
     unique_currencies = set(updated_portfolio["Asset_Currency"].dropna().unique()) - {"PLN"}
     fx_rates = {"PLN": 1.0}
