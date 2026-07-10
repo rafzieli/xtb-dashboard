@@ -154,8 +154,8 @@ def generate_weekly_historical_timeline(df_cash: pd.DataFrame) -> pd.DataFrame:
         dep_day = sub_df[sub_df["Type"] == "Deposit"]["Amount"].sum()
         net_deposits_day = dep_day
         
-        # POPRAWKA: Wolna gotówka chronologicznie bez uwzględniania przelewów na USD
-        cash_balance = sub_df[sub_df["Type"] != "Transfer"]["Amount"].sum()
+        # Wolna gotówka wyliczana jako czysta suma Amount (bez wiersza Total, bo został odfiltrowany na starcie)
+        cash_balance = sub_df["Amount"].sum()
         
         stock_value_pln = 0.0
         if not trade_df.empty:
@@ -208,6 +208,12 @@ try:
         df_closed.columns = df_closed.columns.str.strip()
         df_cash.columns = df_cash.columns.str.strip()
 
+        # 🔥 POPRAWKA: Dynamicznie odrzucamy wiersze podsumowujące "Total" generowane przez XTB na końcu tabeli
+        if not df_closed.empty:
+            df_closed = df_closed[df_closed.iloc[:, 0].astype(str).str.strip().str.upper() != 'TOTAL']
+        if not df_cash.empty:
+            df_cash = df_cash[df_cash.iloc[:, 0].astype(str).str.strip().str.upper() != 'TOTAL']
+
         # Obliczenia bazy
         base_portfolio, realized_pnl = calculate_accurate_portfolio(df_closed, df_cash)
         final_portfolio = fetch_market_and_fx_data(base_portfolio)
@@ -216,14 +222,9 @@ try:
         # 1. Wycena aktualnych akcji
         total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
         
-        # 2. POPRAWKA: Wyliczanie Wolnej Gotówki z pominięciem transferów zewnętrznych (czyste działanie)
-        current_free_cash = df_cash[df_cash["Type"] != "Transfer"]["Amount"].sum()
+        # 2. Czyste wyliczenie wolnych środków (Suma całej oczyszczonej kolumny Amount)
+        current_free_cash = df_cash["Amount"].sum()
         
-        # Zabezpieczenie: jeśli z jakiegoś powodu obliczenie dałoby bzdurę, bierzemy wprost z ostatniej linii (kolumna E)
-        df_chronological = df_cash.sort_values(by="Time")
-        if not df_chronological.empty and current_free_cash < 1.0:
-            current_free_cash = abs(df_chronological.iloc[-1]["Amount"])
-
         # 3. Wartość całkowita portfela (Akcje + Wolna gotówka)
         total_portfolio_value = total_value_stocks + current_free_cash
         
@@ -234,7 +235,7 @@ try:
         total_gain_pln = total_portfolio_value - total_invested
         roi = (total_gain_pln / total_invested) * 100 if total_invested > 0 else 0
 
-        # --- NOWY PANEL METRYK ---
+        # --- PANEL METRYK ---
         st.subheader("📊 Podsumowanie Twojego Portfela")
         
         col1, col2, col3 = st.columns(3)
@@ -254,7 +255,7 @@ try:
         # --- WYKRES LINIOWY (DARK MODE + HOVER Z WYNIKIEM) ---
         st.subheader("📈 Zmiana Wartości Portfela w Czasie")
         
-        line_color = '#00E676' if total_gain_pln >= 0 else '#FF1744' # Neonowy zielony / czerwony
+        line_color = '#00E676' if total_gain_pln >= 0 else '#FF1744'
 
         fig_line = go.Figure()
         
@@ -262,7 +263,7 @@ try:
         fig_line.add_trace(go.Scatter(
             x=timeline_df["Time"], y=timeline_df["Wpłaty"],
             mode='lines', name='Suma Wpłat',
-            line=dict(color='#78909C', width=2, dash='dash'), # Przejrzysty szary
+            line=dict(color='#78909C', width=2, dash='dash'),
             hovertemplate="Data: %{x}<br>Suma Wpłat: %{y:,.2f} zł<extra></extra>"
         ))
         
@@ -270,13 +271,13 @@ try:
         fig_line.add_trace(go.Scatter(
             x=timeline_df["Time"], y=timeline_df["Wartość"],
             mode='lines', name='Wartość Całkowita',
-            customdata=timeline_df["Wynik"], # Przekazanie wyniku bezpośrednio do hovera
+            customdata=timeline_df["Wynik"],
             line=dict(color=line_color, width=3),
             hovertemplate="Data: %{x}<br>Wartość Portfela: %{y:,.2f} zł<br><b>Wynik (Różnica): %{customdata:,.2f} zł</b><extra></extra>"
         ))
         
         fig_line.update_layout(
-            template="plotly_dark", # WYMUSZENIE DARK MODE W PLOTLY
+            template="plotly_dark",
             hovermode="x unified",
             xaxis_title="",
             yaxis_title="Wartość (PLN)",
