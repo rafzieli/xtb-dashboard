@@ -278,7 +278,7 @@ try:
         response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
 
     if response.status_code == 200:
-        raw_df = pd.read_excel(io.BytesIO(response.content), skiprows=4)
+        raw_df = pd.read_excel(io.BytesIO(response.content), skiprows=4, skipfooter=1)
         raw_df.columns = raw_df.columns.str.strip()
         clean_df = raw_df.dropna(subset=["ID"])
 
