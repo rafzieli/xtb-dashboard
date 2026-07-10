@@ -208,8 +208,9 @@ try:
         response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
 
     if response.status_code == 200:
-        df_closed = pd.read_excel(io.BytesIO(response.content), sheet_name="Closed Positions", skiprows=1)
-        df_cash = pd.read_excel(io.BytesIO(response.content), sheet_name="Cash Operations", skiprows=1)
+        # Wczytanie dwóch różnych zakładek
+        df_closed = pd.read_excel(io.BytesIO(response.content), sheet_name="Closed Positions", skiprows=4)
+        df_cash = pd.read_excel(io.BytesIO(response.content), sheet_name="Cash Operations", skiprows=4)
         
         df_closed.columns = df_closed.columns.str.strip()
         df_cash.columns = df_cash.columns.str.strip()
