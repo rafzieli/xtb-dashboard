@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 # --- SET CONFIGURATION ---
 st.set_page_config(page_title="XTB Dashboard", page_icon="💰", layout="wide")
 
+with st.sidebar:
+    st.header("⚙️ Ustawienia")
+    if st.button("🚀 Wymuś pełny restart"):
+        st.cache_data.clear()
+        st.rerun()
+
 st.title("💰 :rat: Szczur Dashboard :rat: 💰")
 st.markdown("---")
 
@@ -104,7 +110,7 @@ def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     if "." not in xtb_ticker: return f"{xtb_ticker}.WA"
     return xtb_ticker
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=1800)
 def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
     if portfolio_df.empty: return portfolio_df
     updated_portfolio = portfolio_df.copy()
