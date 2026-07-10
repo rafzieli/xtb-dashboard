@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import yfinance as yf
 import logging
 import re
@@ -41,7 +42,6 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
     trade_df["Price"] = [x[1] if x is not None else None for x in parsed_data]
     
-    # 1. Wyliczenie aktywnego portfela (to co masz teraz w akcjach)
     portfolio = trade_df.groupby("Ticker").agg(
         Shares_Owned=("Volume_Adjusted", "sum"),
         Net_Cash_Flow=("Amount", "sum")
@@ -50,11 +50,9 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     active_portfolio = portfolio[portfolio["Shares_Owned"] > 0].copy()
     active_portfolio["Total_Invested_Raw"] = -active_portfolio["Net_Cash_Flow"]
     
-    # 2. Wyliczenie ZREALIZOWANEGO ZYSKU (czysta, zainkasowana gotówka ze sprzedaży)
     realized_df = portfolio[portfolio["Shares_Owned"] <= 0].copy()
     realized_pnl = realized_df["Net_Cash_Flow"].sum() if not realized_df.empty else 0.0
     
-    # Uwzględniamy też zysk z częściowej sprzedaży posiadanych jeszcze spółek
     for idx, row in portfolio[portfolio["Shares_Owned"] > 0].iterrows():
         if row["Net_Cash_Flow"] > 0:
             realized_pnl += row["Net_Cash_Flow"]
@@ -130,12 +128,95 @@ def calculate_cash_stats(df: pd.DataFrame) -> dict:
         "interest": interest + interest_tax
     }
 
+@st.cache_data(ttl=3600)
+def generate_weekly_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
+    """Generates a weekly timeline fetching closing prices efficiently via interval='1wk'."""
+    df_sorted = df.copy()
+    df_sorted["Time"] = pd.to_datetime(df_sorted["Time"])
+    df_sorted = df_sorted.sort_values(by="Time")
+    
+    start_date = df_sorted["Time"].min().date()
+    end_date = df_sorted["Time"].max().date()
+    
+    # Generujemy osi czasu co tydzień (np. każdy piątek / koniec tygodnia)
+    weekly_range = pd.date_range(start=start_date, end=end_date, freq="W-FRI").date
+    if len(weekly_range) == 0 or weekly_range[-1] < end_date:
+        weekly_range = list(weekly_range) + [end_date]
+
+    asset_types = ["Stock purchase", "Stock sell"]
+    trade_df = df_sorted[df_sorted["Type"].isin(asset_types)].copy()
+    
+    if not trade_df.empty:
+        parsed_data = trade_df.apply(parse_xtb_comment, axis=1)
+        trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
+        trade_df["Price"] = [x[1] if x is not None else None for x in parsed_data]
+        trade_df["Yahoo_Ticker"] = trade_df["Ticker"].apply(fix_ticker_for_yahoo)
+    
+    unique_tickers = trade_df["Yahoo_Ticker"].dropna().unique() if not trade_df.empty else []
+    
+    # Szybkie, jednoetapowe pobranie cen ZAMKNIĘCIA TYGODNIA dla wszystkich spółek na raz
+    weekly_prices = {}
+    if len(unique_tickers) > 0:
+        try:
+            hist_data = yf.download(list(unique_tickers), period="max", interval="1wk", group_by='ticker', progress=False)
+            for ticker in unique_tickers:
+                if len(unique_tickers) == 1:
+                    weekly_prices[ticker] = hist_data["Close"]
+                else:
+                    if ticker in hist_data.columns.levels[0]:
+                        weekly_prices[ticker] = hist_data[ticker]["Close"]
+        except Exception as e:
+            logger.error(f"Error downloading weekly historical data: {e}")
+
+    timeline_records = []
+    
+    for current_day in weekly_range:
+        sub_df = df_sorted[df_sorted["Time"].dt.date <= current_day]
+        cash_balance = sub_df["Amount"].sum()
+        total_deposits = sub_df[sub_df["Type"].isin(["Deposit", "Transfer"])]["Amount"].sum()
+        
+        stock_value_pln = 0.0
+        
+        if not trade_df.empty:
+            sub_trades = trade_df[trade_df["Time"].dt.date <= current_day]
+            if not sub_trades.empty:
+                shares_per_ticker = sub_trades.groupby("Yahoo_Ticker")["Volume_Adjusted"].sum()
+                for t_symbol, shares in shares_per_ticker.items():
+                    if shares > 0:
+                        price = None
+                        if t_symbol in weekly_prices:
+                            # Szukamy ostatniej dostępnej ceny zamknięcia tygodnia przed/w dniu bieżącym
+                            available_prices = weekly_prices[t_symbol].loc[weekly_prices[t_symbol].index.date <= current_day]
+                            if not available_prices.empty:
+                                price = available_prices.iloc[-1]
+                        
+                        # Fallback do ceny transakcyjnej jeśli yfinance nie ma wpisu
+                        if pd.isna(price) or price is None:
+                            price = sub_trades[sub_trades["Yahoo_Ticker"] == t_symbol]["Price"].iloc[-1]
+                        
+                        # Przybliżony, stabilny historyczny przelicznik walutowy
+                        fx_rate = 1.0
+                        if t_symbol.endswith(".US"): fx_rate = 4.00
+                        elif not t_symbol.endswith(".WA"): fx_rate = 4.30
+                        
+                        stock_value_pln += shares * price * fx_rate
+                        
+        total_portfolio_value = cash_balance + stock_value_pln
+        
+        timeline_records.append({
+            "Time": current_day,
+            "Wpłaty Rzeczywiste (Wkład)": total_deposits,
+            "Realna Wartość Portfela": total_portfolio_value
+        })
+        
+    return pd.DataFrame(timeline_records)
+
 # --- UI EXECUTION FLOW ---
 try:
     GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
     DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
 
-    with st.spinner("Pobieranie aktualnych wycen z giełdy..."):
+    with st.spinner("Pobieranie i precyzyjna analiza osi czasu portfela..."):
         response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
 
     if response.status_code == 200:
@@ -143,12 +224,14 @@ try:
         raw_df.columns = raw_df.columns.str.strip()
         clean_df = raw_df.dropna(subset=["ID"])
 
-        # Obliczenia bazowe
+        # Obliczenia podstawowe portfela
         base_portfolio, realized_pnl = calculate_accurate_portfolio(clean_df)
         final_portfolio = fetch_market_and_fx_data(base_portfolio)
         cash = calculate_cash_stats(clean_df)
+        
+        # Generowanie zoptymalizowanej, tygodniowej osi czasu
+        timeline_df = generate_weekly_historical_timeline(clean_df)
 
-        # Globalne Metryki
         total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
         total_gain_pln = (total_value_stocks + cash["dividends"] + cash["interest"] + realized_pnl) - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
@@ -160,6 +243,34 @@ try:
         col3.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
         col4.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
         col5.metric("Łączny Wynik Portfela", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
+
+        st.markdown("---")
+
+        # --- WYKRES LINIOWY (TYGODNIOWY) ---
+        st.subheader("📈 Realna zmiana wartości portfela w czasie vs Twoje wpłaty")
+        
+        fig_line = go.Figure()
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Wpłaty Rzeczywiste (Wkład)"],
+            mode='lines+markers', name='Wpłaty Rzeczywiste (Twój Wkład)',
+            line=dict(color='rgba(150, 150, 150, 0.7)', width=2, dash='dash'),
+            marker=dict(size=4)
+        ))
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Realna Wartość Portfela"],
+            mode='lines+markers', name='Rynkowa Wartość (Akcje + Gotówka)',
+            line=dict(color='#2ca02c', width=3),
+            marker=dict(size=5)
+        ))
+        
+        fig_line.update_layout(
+            hovermode="x unified",
+            xaxis_title="Data (Zamknięcia Tygodniowe)",
+            yaxis_title="Wartość (PLN)",
+            template="plotly_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_line, use_container_width=True)
 
         st.markdown("---")
 
@@ -190,5 +301,5 @@ try:
         st.error(f"Błąd Dysku Google. Status: {response.status_code}")
 
 except Exception as e:
-    st.error("💥 Wystąpił błąd podczas generowania dashboardu.")
+    st.error("💥 Wystąpił błąd podczas generowania zoptymalizowanego dashboardu.")
     st.exception(e)
