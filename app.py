@@ -38,10 +38,66 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     if trade_df.empty: 
         return pd.DataFrame(), 0.0
     
+    # Czyszczenie i ujednolicenie tickerów, żeby grupy były idealne
+    trade_df["Ticker"] = trade_df["Ticker"].str.strip().str.upper()
+    
     parsed_data = trade_df.apply(parse_xtb_comment, axis=1)
     trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
     trade_df["Price"] = [x[1] if x is not None else None for x in parsed_data]
     
+    realized_pnl = 0.0
+    
+    # Precyzyjne rozliczenie FIFO dla każdego tickera z osobna
+    for ticker, group in trade_df.groupby("Ticker"):
+        buy_queue = []
+        group_sorted = group.sort_values(by="Time")
+        
+        for idx, row in group_sorted.iterrows():
+            vol = row["Volume_Adjusted"]
+            amount = row["Amount"]
+            
+            if row["Type"] == "Stock purchase" and vol is not None:
+                # Zapisujemy ilość i faktycznie wydaną kwotę PLN (jako wartość dodatnią do kosztu)
+                buy_queue.append({"vol": vol, "total_cost": abs(amount)})
+                
+            elif row["Type"] == "Stock sell" and vol is not None:
+                sell_vol = abs(vol)
+                revenue = amount # Przychód ze sprzedaży (dodatni)
+                matched_cost = 0.0
+                
+                # Pobieramy koszt z kolejki zakupów
+                while sell_vol > 0.000001 and len(buy_queue) > 0:
+                    current_buy = buy_queue[0]
+                    if current_buy["vol"] <= sell_vol + 0.000001:
+                        # Wykorzystujemy cały ten zakup
+                        matched_cost += current_buy["total_cost"]
+                        sell_vol -= current_buy["vol"]
+                        buy_queue.pop(0)
+                    else:
+                        # Wykorzystujemy część tego zakupu
+                        proporcja = sell_vol / current_buy["vol"]
+                        matched_cost += current_buy["total_cost"] * proporcja
+                        current_buy["total_cost"] -= current_buy["total_cost"] * proporcja
+                        current_buy["vol"] -= sell_vol
+                        sell_vol = 0
+                
+                # Zysk = Przychód - Koszt zakupu danej transakcji
+                realized_pnl += (revenue - matched_cost)
+
+    # Budujemy aktywny portfel na sam koniec
+    portfolio = trade_df.groupby("Ticker").agg(
+        Shares_Owned=("Volume_Adjusted", "sum"),
+        Net_Cash_Flow=("Amount", "sum")
+    ).reset_index()
+    
+    # Jeśli zostają mikro-ochłapy przez zaokrąglenia XTB (np. mniej niż 0.0001 akcji), czyścimy do zera
+    portfolio["Shares_Owned"] = portfolio["Shares_Owned"].round(6)
+    active_portfolio = portfolio[portfolio["Shares_Owned"] > 0.0001].copy()
+    active_portfolio["Total_Invested_Raw"] = -active_portfolio["Net_Cash_Flow"]
+
+    return active_portfolio.drop(columns=["Net_Cash_Flow"]), round(realized_pnl, 2)
+
+    # Wyliczenie obecnego stanu posiadania do tabeli i struktury
     portfolio = trade_df.groupby("Ticker").agg(
         Shares_Owned=("Volume_Adjusted", "sum"),
         Net_Cash_Flow=("Amount", "sum")
@@ -49,15 +105,8 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     portfolio["Shares_Owned"] = portfolio["Shares_Owned"].round(6)
     active_portfolio = portfolio[portfolio["Shares_Owned"] > 0].copy()
     active_portfolio["Total_Invested_Raw"] = -active_portfolio["Net_Cash_Flow"]
-    
-    realized_df = portfolio[portfolio["Shares_Owned"] <= 0].copy()
-    realized_pnl = realized_df["Net_Cash_Flow"].sum() if not realized_df.empty else 0.0
-    
-    for idx, row in portfolio[portfolio["Shares_Owned"] > 0].iterrows():
-        if row["Net_Cash_Flow"] > 0:
-            realized_pnl += row["Net_Cash_Flow"]
 
-    return active_portfolio.drop(columns=["Net_Cash_Flow"]), realized_pnl
+    return active_portfolio.drop(columns=["Net_Cash_Flow"]), round(realized_pnl, 2)
 
 def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     if not isinstance(xtb_ticker, str): return xtb_ticker
