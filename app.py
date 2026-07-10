@@ -287,10 +287,11 @@ try:
         final_portfolio = fetch_market_and_fx_data(base_portfolio)
         cash = calculate_cash_stats(clean_df)
         timeline_df = generate_weekly_historical_timeline(clean_df)
+        
         total_free_cash = clean_df['Amount'].sum()
-
         total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
-        total_gain_pln = (total_value_stocks + cash["interest"]) - cash["deposits"]
+        total_portfolio_value = total_value_stocks + total_free_cash
+        total_gain_pln = total_portfolio_value - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
 
         # --- PANEL METRYK ---
@@ -303,9 +304,9 @@ try:
 
         st.write("")
         
-        col1, col2 = st.columns(2)
-        col1.metric("Wycena Portfela (PLN)", f"{total_value_stocks + total_free_cash:,.2f} zł")
-        col2.metric("Wolne srodki (PLN)", f"{total_free_cash:,.2f} zł")
+        col6, col7 = st.columns(2)
+        col6.metric("Wycena Portfela (PLN)", f"{total_portfolio_value:,.2f} zł")
+        col7.metric("Wolne srodki (PLN)", f"{total_free_cash:,.2f} zł")
 
         st.markdown("---")
 
