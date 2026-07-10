@@ -289,7 +289,7 @@ try:
         timeline_df = generate_weekly_historical_timeline(clean_df)
 
         total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
-        total_gain_pln = total_value_stocks - cash["deposits"]
+        total_gain_pln = (total_value_stocks + cash["interest"]) - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
 
         # --- PANEL METRYK ---
