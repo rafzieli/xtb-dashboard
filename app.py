@@ -230,4 +230,65 @@ try:
         # --- PANEL METRYK ---
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Wycena Akcji (PLN)", f"{total_value_stocks:,.2f} zł")
-        col2.
+        col2.metric("Suma Twoich Wpłat", f"{cash['deposits']:,.2f} zł")
+        col3.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
+        col4.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
+        col5.metric("Niezrealizowany Zysk / Strata", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
+
+        st.markdown("---")
+
+        # --- POPRAWIONY WYKRES LINIOWY ---
+        st.subheader("📈 Realna zmiana wartości portfela w czasie vs Twoje wpłaty")
+        
+        fig_line = go.Figure()
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Wpłaty Rzeczywiste (Wkład)"],
+            mode='lines', name='Wpłaty Rzeczywiste (Twój Wkład)',
+            line=dict(color='rgba(150, 150, 150, 0.7)', width=2, dash='dash')
+        ))
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Całkowita Wartość Portfela"],
+            mode='lines', name='Wartość Portfela (Rynek + Gotówka)',
+            line=dict(color='#2ca02c', width=3)
+        ))
+        
+        fig_line.update_layout(
+            hovermode="x unified",
+            xaxis_title="Data",
+            yaxis_title="Wartość (PLN)",
+            template="plotly_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_line, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- WYKRESY STRUKTURY ---
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.subheader("Struktura Portfela")
+            if not final_portfolio.empty:
+                fig_pie = px.pie(final_portfolio, values="Current_Value_PLN", names="Ticker", hole=0.4,
+                                 color_discrete_sequence=px.colors.sequential.RdBu)
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        with chart_col2:
+            st.subheader("Wartość Pozycji w PLN")
+            if not final_portfolio.empty:
+                fig_bar = px.bar(final_portfolio.sort_values(by="Current_Value_PLN", ascending=True), 
+                                 x="Current_Value_PLN", y="Ticker", orientation="h",
+                                 text_auto=",.2f", color="Current_Value_PLN",
+                                 color_continuous_scale=px.colors.sequential.Viridis)
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+        # --- TABELA ---
+        st.subheader("📋 Szczegóły Twoich Pozycji")
+        if not final_portfolio.empty:
+            st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], use_container_width=True)
+
+    else:
+        st.error(f"Błąd Dysku Google. Status: {response.status_code}")
+
+except Exception as e:
+    st.error("💥 Wystąpił błąd podczas generowania rozszerzonego dashboardu.")
+    st.exception(e)
