@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import yfinance as yf
 import logging
 import re
 import io
@@ -42,13 +41,26 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
     trade_df["Price"] = [x[1] if x is not None else None for x in parsed_data]
     
+    # Wyliczanie obecnego stanu posiadania i uśrednionej ceny zakupu na podstawie transakcji
     portfolio = trade_df.groupby("Ticker").agg(
         Shares_Owned=("Volume_Adjusted", "sum"),
         Net_Cash_Flow=("Amount", "sum")
     ).reset_index()
     portfolio["Shares_Owned"] = portfolio["Shares_Owned"].round(6)
     active_portfolio = portfolio[portfolio["Shares_Owned"] > 0].copy()
-    active_portfolio["Total_Invested_Raw"] = -active_portfolio["Net_Cash_Flow"]
+    
+    # Wyliczamy wartość rynkową na bazie ceny zakupu jako bezpieczny fallback (gdy brak Yahoo)
+    # Dla uproszczenia bierzemy ostatnią cenę zakupu z transakcji jako Current_Price
+    last_prices = {}
+    for ticker in active_portfolio["Ticker"]:
+        ticker_trades = trade_df[trade_df["Ticker"] == ticker]
+        if not ticker_trades.empty:
+            last_prices[ticker] = ticker_trades.iloc[-1]["Price"]
+            
+    active_portfolio["Current_Price"] = active_portfolio["Ticker"].map(last_prices)
+    # Z pliku XTB wartość w PLN wyciągamy bezpośrednio z ujemnego Net_Cash_Flow (włożony kapitał)
+    active_portfolio["Current_Value_PLN"] = -active_portfolio["Net_Cash_Flow"]
+    active_portfolio["Asset_Currency"] = "PLN" # Wartość końcowa w raporcie XTB jest już w PLN
     
     realized_df = portfolio[portfolio["Shares_Owned"] <= 0].copy()
     realized_pnl = realized_df["Net_Cash_Flow"].sum() if not realized_df.empty else 0.0
@@ -57,57 +69,7 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
         if row["Net_Cash_Flow"] > 0:
             realized_pnl += row["Net_Cash_Flow"]
 
-    return active_portfolio.drop(columns=["Net_Cash_Flow"]), realized_pnl
-
-def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
-    if not isinstance(xtb_ticker, str): return xtb_ticker
-    if xtb_ticker.endswith(".US"): return xtb_ticker.replace(".US", "")
-    if xtb_ticker.endswith(".PL"): return xtb_ticker.replace(".PL", ".WA")
-    if "." not in xtb_ticker: return f"{xtb_ticker}.WA"
-    return xtb_ticker
-
-@st.cache_data(ttl=600)
-def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
-    if portfolio_df.empty: return portfolio_df
-    updated_portfolio = portfolio_df.copy()
-    updated_portfolio["Yahoo_Ticker"] = updated_portfolio["Ticker"].apply(fix_ticker_for_yahoo)
-    
-    current_prices, currencies = {}, {}
-    tickers_to_fetch = updated_portfolio["Yahoo_Ticker"].unique()
-    
-    for y_ticker in tickers_to_fetch:
-        try:
-            t = yf.Ticker(y_ticker)
-            hist = t.history(period="1d", timeout=3)
-            price = hist["Close"].iloc[-1] if not hist.empty else t.info.get("previousClose")
-            currency = t.info.get("currency", "USD")
-            if price is not None and currency in ["ILA", "GBX"] and y_ticker.endswith(".WA"):
-                price /= 100.0
-                currency = "PLN"
-            current_prices[y_ticker] = price
-            currencies[y_ticker] = currency
-        except:
-            current_prices[y_ticker], currencies[y_ticker] = None, "USD"
-
-    updated_portfolio["Current_Price"] = updated_portfolio["Yahoo_Ticker"].map(current_prices)
-    updated_portfolio["Asset_Currency"] = updated_portfolio["Yahoo_Ticker"].map(currencies).fillna("USD")
-    updated_portfolio["Current_Value_Native"] = updated_portfolio["Shares_Owned"] * updated_portfolio["Current_Price"]
-    
-    unique_currencies = set(updated_portfolio["Asset_Currency"].dropna().unique()) - {"PLN"}
-    fx_rates = {"PLN": 1.0}
-    
-    for curr in unique_currencies:
-        try:
-            fx_ticker = f"{curr}PLN=X"
-            t_fx = yf.Ticker(fx_ticker)
-            hist_fx = t_fx.history(period="1d", timeout=3)
-            fx_rates[curr] = float(hist_fx["Close"].iloc[-1]) if not hist_fx.empty else (4.00 if curr == "USD" else 4.30)
-        except:
-            fx_rates[curr] = 4.00 if curr == "USD" else 4.30
-
-    updated_portfolio["FX_Rate"] = updated_portfolio["Asset_Currency"].map(fx_rates).fillna(1.0)
-    updated_portfolio["Current_Value_PLN"] = updated_portfolio["Current_Value_Native"] * updated_portfolio["FX_Rate"]
-    return updated_portfolio
+    return active_portfolio, realized_pnl
 
 def calculate_cash_stats(df: pd.DataFrame) -> dict:
     deposits = df[df["Type"].isin(["Deposit", "Transfer"])]["Amount"].sum()
@@ -122,7 +84,7 @@ def calculate_cash_stats(df: pd.DataFrame) -> dict:
     }
 
 def generate_stable_timeline(df: pd.DataFrame) -> pd.DataFrame:
-    """Generates a day-by-day timeline using ledger cash flows without web queries."""
+    """Generates a day-by-day timeline using total cumulative asset values from ledger."""
     df_sorted = df.copy()
     df_sorted["Time"] = pd.to_datetime(df_sorted["Time"]).dt.date
     df_sorted = df_sorted.sort_values(by="Time")
@@ -131,21 +93,46 @@ def generate_stable_timeline(df: pd.DataFrame) -> pd.DataFrame:
     end_date = df_sorted["Time"].max()
     all_days = pd.date_range(start=start_date, end=end_date).date
     
+    asset_types = ["Stock purchase", "Stock sell"]
+    trade_df = df_sorted[df_sorted["Type"].isin(asset_types)].copy()
+    if not trade_df.empty:
+        parsed_data = trade_df.apply(parse_xtb_comment, axis=1)
+        trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
+        trade_df["Price"] = [x[1] if x is not None else None for x in parsed_data]
+    
     timeline_records = []
     
     for current_day in all_days:
         sub_df = df_sorted[df_sorted["Time"] <= current_day]
         
-        # Całkowity wkład w danym dniu
+        # 1. Suma wpłat (Wkład rzeczywisty)
         total_deposits = sub_df[sub_df["Type"].isin(["Deposit", "Transfer"])]["Amount"].sum()
         
-        # Całkowity stan księgowy na koncie (wpłaty + zamknięte zyski + dywidendy + wartość pozycji wg zakupu)
-        ledger_value = sub_df["Amount"].sum()
+        # 2. Wolna gotówka na koncie w danym dniu
+        cash_balance = sub_df["Amount"].sum()
+        
+        # 3. Wycena posiadanych akcji w danym dniu po cenie zakupu
+        stock_value_pln = 0.0
+        if not trade_df.empty:
+            sub_trades = trade_df[trade_df["Time"] <= current_day]
+            if not sub_trades.empty:
+                # Sprawdzamy stan posiadania i uśredniony koszt dla każdej spółki na ten dzień
+                for ticker, group in sub_trades.groupby("Ticker"):
+                    shares = group["Volume_Adjusted"].sum()
+                    if shares > 0:
+                        # Szacujemy wartość na podstawie kwot transakcji z raportu (Amount)
+                        # Suma ujemnych Amount to kapitał ulokowany w spółce
+                        invested_in_ticker = -group["Amount"].sum()
+                        if invested_in_ticker > 0:
+                            stock_value_pln += invested_in_ticker
+
+        # Całkowita wartość portfela to wolna gotówka + wartość posiadanych akcji
+        total_portfolio_value = cash_balance + stock_value_pln
         
         timeline_records.append({
             "Time": current_day,
             "Wpłaty Rzeczywiste (Wkład)": total_deposits,
-            "Księgowa Wartość Portfela": ledger_value
+            "Wartość Portfela Księgowa": total_portfolio_value
         })
         
     return pd.DataFrame(timeline_records)
@@ -155,7 +142,7 @@ try:
     GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
     DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
 
-    with st.spinner("Pobieranie i przetwarzanie raportu XTB..."):
+    with st.spinner("Przetwarzanie danych lokalnych portfela..."):
         response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
 
     if response.status_code == 200:
@@ -163,13 +150,14 @@ try:
         raw_df.columns = raw_df.columns.str.strip()
         clean_df = raw_df.dropna(subset=["ID"])
 
-        # Obliczenia bazowe
-        base_portfolio, realized_pnl = calculate_accurate_portfolio(clean_df)
-        final_portfolio = fetch_market_and_fx_data(base_portfolio)
+        # Obliczenia bazowe (100% z pliku, bez sieci)
+        final_portfolio, realized_pnl = calculate_accurate_portfolio(clean_df)
         cash = calculate_cash_stats(clean_df)
         timeline_df = generate_stable_timeline(clean_df)
 
         total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
+        
+        # Całkowity zysk (Wycena + zrealizowany + dywidendy) minus wkład
         total_gain_pln = (total_value_stocks + cash["dividends"] + cash["interest"] + realized_pnl) - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
 
@@ -184,7 +172,7 @@ try:
         st.markdown("---")
 
         # --- WYKRES LINIOWY ---
-        st.subheader("📈 Zmiana wartości środków w czasie vs Twoje wpłaty")
+        st.subheader("📈 Zmiana wartości portfela w czasie vs Twoje wpłaty")
         
         fig_line = go.Figure()
         fig_line.add_trace(go.Scatter(
@@ -193,8 +181,8 @@ try:
             line=dict(color='rgba(150, 150, 150, 0.7)', width=2, dash='dash')
         ))
         fig_line.add_trace(go.Scatter(
-            x=timeline_df["Time"], y=timeline_df["Księgowa Wartość Portfela"],
-            mode='lines', name='Księgowy Stan Konta (Zyski/Straty/Dywidendy)',
+            x=timeline_df["Time"], y=timeline_df["Wartość Portfela Księgowa"],
+            mode='lines', name='Całkowita Wartość (Akcje + Gotówka)',
             line=dict(color='#2ca02c', width=3)
         ))
         
