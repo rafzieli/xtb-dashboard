@@ -283,7 +283,7 @@ try:
         total_gain_pln = total_portfolio_value - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
 
-        # --- PANEL METRYK ---
+        # --- ZMODYFIKOWANY PANEL METRYK ---
         st.subheader("📊 Stan i Wyniki Twojego Portfela")
         
         # Wiersz 1: Obecny stan konta i środków (4 równe kolumny)
@@ -303,82 +303,35 @@ try:
         
         # 🔄 Kolumna z przyciskiem odświeżania danych
         with row2_col4:
-            st.write("") 
+            st.write("") # Dwa wolne wiersze, żeby wyrównać przycisk w dół do poziomu metryk
             st.write("")
             if st.button("🔄 Odśwież dane", use_container_width=True):
-                st.cache_data.clear() 
-                st.rerun()           
+                st.cache_data.clear() # Czyszczenie pamięci podręcznej (wymusi ponowne pobranie z Drive / Yahoo)
+                st.rerun()           # Przeładowanie skryptu
 
         st.markdown("---")
 
-        # --- WYKRES LINIOWY (ZMODYFIKOWANY, PREMIUM DESIGN) ---
+        # --- WYKRES LINIOWY (TYGODNIOWY) ---
         st.subheader("📈 Realna zmiana wartości portfela w czasie vs Twoje wpłaty")
         
-        # Obliczenie historycznego wyniku (zysku/straty) w każdym punkcie czasowym do chmurki
-        timeline_df["Wynik (Zysk/Strata)"] = timeline_df["Realna Wartość Portfela"] - timeline_df["Wpłaty Rzeczywiste (Wkład Netto)"]
-        
         fig_line = go.Figure()
-        
-        # Dynamiczne kolory w zależności od ogólnego wyniku finansowego
-        line_color = '#00cc66' if total_gain_pln >= 0 else '#ff3333'
-        fill_color = 'rgba(0, 204, 102, 0.06)' if total_gain_pln >= 0 else 'rgba(255, 51, 51, 0.06)'
-
-        # Ścieżka 1: Twój wkład finansowy (Linia odniesienia)
         fig_line.add_trace(go.Scatter(
-            x=timeline_df["Time"], 
-            y=timeline_df["Wpłaty Rzeczywiste (Wkład Netto)"],
-            mode='lines', 
-            name='Suma Wpłat Netto',
-            line=dict(color='rgba(148, 163, 184, 0.6)', width=2, dash='dot', shape='spline'),
-            hovertemplate='Wpłacono: %{y:,.2f} zł<extra></extra>'
+            x=timeline_df["Time"], y=timeline_df["Wpłaty Rzeczywiste (Wkład Netto)"],
+            mode='lines', name='Twój Realny Wkład (Wpłaty Netto)',
+            line=dict(color='rgba(150, 150, 150, 0.8)', width=2, dash='dash')
+        ))
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Realna Wartość Portfela"],
+            mode='lines', name='Rynkowa Wartość (Akcje + Gotówka)',
+            line=dict(color='#cc0000' if total_gain_pln < 0 else '#2ca02c', width=3)
         ))
         
-        # Ścieżka 2: Realna rynkowa wartość (Z wypełnieniem i płynną krzywą)
-        fig_line.add_trace(go.Scatter(
-            x=timeline_df["Time"], 
-            y=timeline_df["Realna Wartość Portfela"],
-            mode='lines', 
-            name='Wycena Portfela',
-            fill='tozeroy',
-            fillcolor=fill_color,
-            line=dict(color=line_color, width=3.5, shape='spline'),
-            # Przekazujemy serie z wynikami do customdata, aby wyciągnąć ją w hovertemplate
-            customdata=timeline_df[["Wynik (Zysk/Strata)"]],
-            hovertemplate='Wycena: %{y:,.2f} zł<br><b>Wynik: %{customdata[0]:+,.2f} zł</b><extra></extra>'
-        ))
-        
-        # Nowoczesny, czysty układ wykresu
         fig_line.update_layout(
             hovermode="x unified",
-            hoverlabel=dict(
-                bgcolor="rgba(255, 255, 255, 0.95)",
-                font_size=13,
-                font_family="Arial"
-            ),
-            xaxis=dict(
-                title="",
-                showgrid=True,
-                gridcolor='rgba(241, 245, 249, 1)',
-                linecolor='rgba(226, 232, 240, 1)'
-            ),
-            yaxis=dict(
-                title="Wartość (PLN)",
-                showgrid=True,
-                gridcolor='rgba(241, 245, 249, 1)',
-                linecolor='rgba(226, 232, 240, 1)',
-                zeroline=False
-            ),
+            xaxis_title="Data (Zamknięcia Tygodniowe)",
+            yaxis_title="Wartość (PLN)",
             template="plotly_white",
-            margin=dict(l=10, r=10, t=20, b=10),
-            legend=dict(
-                orientation="h", 
-                yanchor="bottom", 
-                y=1.02, 
-                xanchor="left", 
-                x=0,
-                font=dict(size=12)
-            ),
-            height=450
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig_line, use_container_width=True)
 
