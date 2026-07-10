@@ -97,17 +97,6 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
 
     return active_portfolio.drop(columns=["Net_Cash_Flow"]), round(realized_pnl, 2)
 
-    # Wyliczenie obecnego stanu posiadania do tabeli i struktury
-    portfolio = trade_df.groupby("Ticker").agg(
-        Shares_Owned=("Volume_Adjusted", "sum"),
-        Net_Cash_Flow=("Amount", "sum")
-    ).reset_index()
-    portfolio["Shares_Owned"] = portfolio["Shares_Owned"].round(6)
-    active_portfolio = portfolio[portfolio["Shares_Owned"] > 0].copy()
-    active_portfolio["Total_Invested_Raw"] = -active_portfolio["Net_Cash_Flow"]
-
-    return active_portfolio.drop(columns=["Net_Cash_Flow"]), round(realized_pnl, 2)
-
 def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     if not isinstance(xtb_ticker, str): return xtb_ticker
     if xtb_ticker.endswith(".US"): return xtb_ticker.replace(".US", "")
@@ -294,19 +283,23 @@ try:
         total_gain_pln = total_portfolio_value - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
 
-        # --- PANEL METRYK ---
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Wycena Akcji (PLN)", f"{total_value_stocks:,.2f} zł")
-        col2.metric("Suma Twoich Wpłat Netto", f"{cash['deposits']:,.2f} zł")
-        col3.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
-        col4.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
-        col5.metric("Łączny Wynik Portfela", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
-
-        st.write("")
+        # --- ZMODYFIKOWANY PANEL METRYK ---
+        st.subheader("📊 Stan i Wyniki Twojego Portfela")
         
-        col6, col7 = st.columns(2)
-        col6.metric("Wycena Portfela (PLN)", f"{total_portfolio_value:,.2f} zł")
-        col7.metric("Wolne srodki (PLN)", f"{total_free_cash:,.2f} zł")
+        # Wiersz 1: Obecny stan konta i środków (4 równe kolumny)
+        row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
+        row1_col1.metric("Wycena Portfela (PLN)", f"{total_portfolio_value:,.2f} zł")
+        row1_col2.metric("Wycena Akcji (PLN)", f"{total_value_stocks:,.2f} zł")
+        row1_col3.metric("Wolne środki (PLN)", f"{total_free_cash:,.2f} zł")
+        row1_col4.metric("Suma Wpłat Netto", f"{cash['deposits']:,.2f} zł")
+
+        st.write("") # Kosmetyczny odstęp pionowy między wierszami
+
+        # Wiersz 2: Zyski i zwroty (3 równe kolumny)
+        row2_col1, row2_col2, row2_col3 = st.columns(3)
+        row2_col1.metric("Łączny Wynik Portfela", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
+        row2_col2.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
+        row2_col3.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
 
         st.markdown("---")
 
