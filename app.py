@@ -121,36 +121,41 @@ def calculate_cash_stats(df: pd.DataFrame) -> dict:
         "interest": interest + interest_tax
     }
 
-def generate_fast_timeline(df: pd.DataFrame, current_portfolio_value: float) -> pd.DataFrame:
-    """Generates a reliable timeline without heavy external web scraping."""
+def generate_stable_timeline(df: pd.DataFrame) -> pd.DataFrame:
+    """Generates a day-by-day timeline using ledger cash flows without web queries."""
     df_sorted = df.copy()
     df_sorted["Time"] = pd.to_datetime(df_sorted["Time"]).dt.date
     df_sorted = df_sorted.sort_values(by="Time")
     
-    daily = df_sorted.groupby("Time").agg(
-        Daily_Amount=("Amount", "sum"),
-        Daily_Deposits=("Amount", lambda x: x[df_sorted.loc[x.index, "Type"].isin(["Deposit", "Transfer"])].sum())
-    ).reset_index()
+    start_date = df_sorted["Time"].min()
+    end_date = df_sorted["Time"].max()
+    all_days = pd.date_range(start=start_date, end=end_date).date
     
-    daily["Wpłaty Rzeczywiste (Wkład)"] = daily["Daily_Deposits"].cumsum()
-    # Szacowana wartość oparta na bilansie księgowym wpłat/wypłat i transakcji
-    daily["Wartość Księgowa Portfela"] = daily["Daily_Amount"].cumsum()
+    timeline_records = []
     
-    # Żeby wykres kończył się aktualną wyceną rynkową:
-    if not daily.empty:
-        daily.loc[daily.index[-1], "Całkowita Wartość Portfela"] = current_portfolio_value + (daily.loc[daily.index[-1], "Wartość Księgowa Portfela"] - daily.loc[daily.index[-1], "Wpłaty Rzeczywiste (Wkład)"])
-        daily["Całkowita Wartość Portfela"] = daily["Całkowita Wartość Portfela"].fillna(daily["Wartość Księgowa Portfela"])
-    else:
-        daily["Całkowita Wartość Portfela"] = daily["Wartość Księgowa Portfela"]
+    for current_day in all_days:
+        sub_df = df_sorted[df_sorted["Time"] <= current_day]
         
-    return daily
+        # Całkowity wkład w danym dniu
+        total_deposits = sub_df[sub_df["Type"].isin(["Deposit", "Transfer"])]["Amount"].sum()
+        
+        # Całkowity stan księgowy na koncie (wpłaty + zamknięte zyski + dywidendy + wartość pozycji wg zakupu)
+        ledger_value = sub_df["Amount"].sum()
+        
+        timeline_records.append({
+            "Time": current_day,
+            "Wpłaty Rzeczywiste (Wkład)": total_deposits,
+            "Księgowa Wartość Portfela": ledger_value
+        })
+        
+    return pd.DataFrame(timeline_records)
 
 # --- UI EXECUTION FLOW ---
 try:
     GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
     DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
 
-    with st.spinner("Pobieranie i błyskawiczna analiza danych..."):
+    with st.spinner("Pobieranie i przetwarzanie raportu XTB..."):
         response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
 
     if response.status_code == 200:
@@ -158,13 +163,13 @@ try:
         raw_df.columns = raw_df.columns.str.strip()
         clean_df = raw_df.dropna(subset=["ID"])
 
+        # Obliczenia bazowe
         base_portfolio, realized_pnl = calculate_accurate_portfolio(clean_df)
         final_portfolio = fetch_market_and_fx_data(base_portfolio)
         cash = calculate_cash_stats(clean_df)
-        
-        total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
-        timeline_df = generate_fast_timeline(clean_df, total_value_stocks)
+        timeline_df = generate_stable_timeline(clean_df)
 
+        total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
         total_gain_pln = (total_value_stocks + cash["dividends"] + cash["interest"] + realized_pnl) - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
 
@@ -173,4 +178,63 @@ try:
         col1.metric("Wycena Akcji (PLN)", f"{total_value_stocks:,.2f} zł")
         col2.metric("Suma Twoich Wpłat", f"{cash['deposits']:,.2f} zł")
         col3.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
-        col
+        col4.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
+        col5.metric("Niezrealizowany Zysk / Strata", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
+
+        st.markdown("---")
+
+        # --- WYKRES LINIOWY ---
+        st.subheader("📈 Zmiana wartości środków w czasie vs Twoje wpłaty")
+        
+        fig_line = go.Figure()
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Wpłaty Rzeczywiste (Wkład)"],
+            mode='lines', name='Wpłaty Rzeczywiste (Twój Wkład)',
+            line=dict(color='rgba(150, 150, 150, 0.7)', width=2, dash='dash')
+        ))
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Księgowa Wartość Portfela"],
+            mode='lines', name='Księgowy Stan Konta (Zyski/Straty/Dywidendy)',
+            line=dict(color='#2ca02c', width=3)
+        ))
+        
+        fig_line.update_layout(
+            hovermode="x unified",
+            xaxis_title="Data",
+            yaxis_title="Wartość (PLN)",
+            template="plotly_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_line, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- WYKRESY STRUKTURY ---
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.subheader("Struktura Portfela")
+            if not final_portfolio.empty:
+                fig_pie = px.pie(final_portfolio, values="Current_Value_PLN", names="Ticker", hole=0.4,
+                                 color_discrete_sequence=px.colors.sequential.RdBu)
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        with chart_col2:
+            st.subheader("Wartość Pozycji w PLN")
+            if not final_portfolio.empty:
+                fig_bar = px.bar(final_portfolio.sort_values(by="Current_Value_PLN", ascending=True), 
+                                 x="Current_Value_PLN", y="Ticker", orientation="h",
+                                 text_auto=",.2f", color="Current_Value_PLN",
+                                 color_continuous_scale=px.colors.sequential.Viridis)
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+        # --- TABELA ---
+        st.subheader("📋 Szczegóły Twoich Pozycji")
+        if not final_portfolio.empty:
+            st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], use_container_width=True)
+
+    else:
+        st.error(f"Błąd Dysku Google. Status: {response.status_code}")
+
+except Exception as e:
+    st.error("💥 Wystąpił błąd podczas generowania dashboardu.")
+    st.exception(e)
