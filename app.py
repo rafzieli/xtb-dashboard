@@ -170,4 +170,25 @@ try:
             if not final_portfolio.empty:
                 fig_pie = px.pie(final_portfolio, values="Current_Value_PLN", names="Ticker", hole=0.4,
                                  color_discrete_sequence=px.colors.sequential.RdBu)
-                st.plotly_
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        with chart_col2:
+            st.subheader("Wartość Pozycji w PLN")
+            if not final_portfolio.empty:
+                fig_bar = px.bar(final_portfolio.sort_values(by="Current_Value_PLN", ascending=True), 
+                                 x="Current_Value_PLN", y="Ticker", orientation="h",
+                                 text_auto=",.2f", color="Current_Value_PLN",
+                                 color_continuous_scale=px.colors.sequential.Viridis)
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+        # --- TABELA ---
+        st.subheader("📋 Szczegóły Twoich Pozycji")
+        if not final_portfolio.empty:
+            st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], use_container_width=True)
+
+    else:
+        st.error(f"Błąd Dysku Google. Status: {response.status_code}")
+
+except Exception as e:
+    st.error("💥 Wystąpił błąd podczas generowania dashboardu.")
+    st.exception(e)
