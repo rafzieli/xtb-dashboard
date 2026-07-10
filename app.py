@@ -135,4 +135,190 @@ def generate_weekly_historical_timeline(df_cash: pd.DataFrame) -> pd.DataFrame:
     weekly_prices = {}
     if len(unique_tickers) > 0:
         try:
-            hist_data = yf.
+            hist_data = yf.download(list(unique_tickers), period="max", interval="1wk", group_by='ticker', progress=False)
+            for ticker in unique_tickers:
+                if len(unique_tickers) == 1:
+                    weekly_prices[ticker] = hist_data["Close"]
+                else:
+                    if ticker in hist_data.columns.levels[0]:
+                        weekly_prices[ticker] = hist_data[ticker]["Close"]
+        except Exception:
+            pass
+
+    timeline_records = []
+    
+    for current_day in weekly_range:
+        sub_df = df_sorted[df_sorted["Time"].dt.date <= current_day]
+        
+        # Wkład netto na dany dzień
+        dep_day = sub_df[sub_df["Type"] == "Deposit"]["Amount"].sum()
+        net_deposits_day = dep_day
+        
+        # POPRAWKA: Wolna gotówka chronologicznie bez uwzględniania przelewów na USD
+        cash_balance = sub_df[sub_df["Type"] != "Transfer"]["Amount"].sum()
+        
+        stock_value_pln = 0.0
+        if not trade_df.empty:
+            sub_trades = trade_df[trade_df["Time"].dt.date <= current_day]
+            if not sub_trades.empty:
+                shares_per_ticker = sub_trades.groupby("Yahoo_Ticker")["Volume_Adjusted"].sum()
+                for t_symbol, shares in shares_per_ticker.items():
+                    if shares > 0.0001:
+                        price = None
+                        if t_symbol in weekly_prices:
+                            available_prices = weekly_prices[t_symbol].loc[weekly_prices[t_symbol].index.date <= current_day]
+                            if not available_prices.empty:
+                                price = available_prices.iloc[-1]
+                        
+                        if pd.isna(price) or price is None:
+                            price = 0.0 
+                        
+                        fx_rate = 1.0
+                        if t_symbol.endswith(".US") or ("." not in t_symbol and not t_symbol.endswith(".WA")): 
+                            fx_rate = 4.00
+                        elif not t_symbol.endswith(".WA"): 
+                            fx_rate = 4.30
+                        
+                        stock_value_pln += shares * price * fx_rate
+                        
+        total_portfolio_value = cash_balance + stock_value_pln
+        wynik = total_portfolio_value - net_deposits_day
+        
+        timeline_records.append({
+            "Time": current_day,
+            "Wpłaty": net_deposits_day,
+            "Wartość": total_portfolio_value,
+            "Wynik": wynik
+        })
+        
+    return pd.DataFrame(timeline_records)
+
+# --- UI EXECUTION FLOW ---
+try:
+    GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
+    DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
+
+    with st.spinner("Przetwarzanie danych i konfiguracja Dark Mode..."):
+        response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
+
+    if response.status_code == 200:
+        df_closed = pd.read_excel(io.BytesIO(response.content), sheet_name="Closed Positions", skiprows=4)
+        df_cash = pd.read_excel(io.BytesIO(response.content), sheet_name="Cash Operations", skiprows=4)
+        
+        df_closed.columns = df_closed.columns.str.strip()
+        df_cash.columns = df_cash.columns.str.strip()
+
+        # Obliczenia bazy
+        base_portfolio, realized_pnl = calculate_accurate_portfolio(df_closed, df_cash)
+        final_portfolio = fetch_market_and_fx_data(base_portfolio)
+        timeline_df = generate_weekly_historical_timeline(df_cash)
+
+        # 1. Wycena aktualnych akcji
+        total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
+        
+        # 2. POPRAWKA: Wyliczanie Wolnej Gotówki z pominięciem transferów zewnętrznych (czyste działanie)
+        current_free_cash = df_cash[df_cash["Type"] != "Transfer"]["Amount"].sum()
+        
+        # Zabezpieczenie: jeśli z jakiegoś powodu obliczenie dałoby bzdurę, bierzemy wprost z ostatniej linii (kolumna E)
+        df_chronological = df_cash.sort_values(by="Time")
+        if not df_chronological.empty and current_free_cash < 1.0:
+            current_free_cash = abs(df_chronological.iloc[-1]["Amount"])
+
+        # 3. Wartość całkowita portfela (Akcje + Wolna gotówka)
+        total_portfolio_value = total_value_stocks + current_free_cash
+        
+        # 4. Wkład Netto (tylko rzeczywiste depozyty)
+        total_invested = df_cash[df_cash["Type"] == "Deposit"]["Amount"].sum()
+        
+        # 5. Wynik Portfela (Różnica wartości rynkowej i wpłat)
+        total_gain_pln = total_portfolio_value - total_invested
+        roi = (total_gain_pln / total_invested) * 100 if total_invested > 0 else 0
+
+        # --- NOWY PANEL METRYK ---
+        st.subheader("📊 Podsumowanie Twojego Portfela")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Wycena Akcji", f"{total_value_stocks:,.2f} zł")
+        col2.metric("Wolne Środki (PLN)", f"{current_free_cash:,.2f} zł")
+        col3.metric("Wartość Całkowita Portfela", f"{total_portfolio_value:,.2f} zł")
+        
+        st.write("") 
+        
+        col4, col5, col6 = st.columns(3)
+        col4.metric("Suma Wpłat (Wkład Netto)", f"{total_invested:,.2f} zł")
+        col5.metric("Wynik Portfela (Zysk/Strata)", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
+        col6.metric("Zrealizowany Zysk 🟢 (Historia)", f"{realized_pnl:,.2f} zł")
+
+        st.markdown("---")
+
+        # --- WYKRES LINIOWY (DARK MODE + HOVER Z WYNIKIEM) ---
+        st.subheader("📈 Zmiana Wartości Portfela w Czasie")
+        
+        line_color = '#00E676' if total_gain_pln >= 0 else '#FF1744' # Neonowy zielony / czerwony
+
+        fig_line = go.Figure()
+        
+        # Linia wkładu
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Wpłaty"],
+            mode='lines', name='Suma Wpłat',
+            line=dict(color='#78909C', width=2, dash='dash'), # Przejrzysty szary
+            hovertemplate="Data: %{x}<br>Suma Wpłat: %{y:,.2f} zł<extra></extra>"
+        ))
+        
+        # Linia wartości portfela z jawnym WYNIKIEM na hoverze
+        fig_line.add_trace(go.Scatter(
+            x=timeline_df["Time"], y=timeline_df["Wartość"],
+            mode='lines', name='Wartość Całkowita',
+            customdata=timeline_df["Wynik"], # Przekazanie wyniku bezpośrednio do hovera
+            line=dict(color=line_color, width=3),
+            hovertemplate="Data: %{x}<br>Wartość Portfela: %{y:,.2f} zł<br><b>Wynik (Różnica): %{customdata:,.2f} zł</b><extra></extra>"
+        ))
+        
+        fig_line.update_layout(
+            template="plotly_dark", # WYMUSZENIE DARK MODE W PLOTLY
+            hovermode="x unified",
+            xaxis_title="",
+            yaxis_title="Wartość (PLN)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=0, r=0, t=30, b=0)
+        )
+        st.plotly_chart(fig_line, use_container_width=True)
+
+        st.markdown("---")
+
+        # --- WYKRESY STRUKTURY (DARK MODE) ---
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.subheader("Struktura Portfela (Akcje)")
+            if not final_portfolio.empty:
+                fig_pie = px.pie(final_portfolio, values="Current_Value_PLN", names="Ticker", hole=0.4,
+                                 color_discrete_sequence=px.colors.cyclical.IceFire)
+                fig_pie.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        with chart_col2:
+            st.subheader("Wartość Pozycji (PLN)")
+            if not final_portfolio.empty:
+                fig_bar = px.bar(
+                    final_portfolio.sort_values(by="Current_Value_PLN", ascending=True), 
+                    x="Current_Value_PLN", y="Ticker", orientation="h",
+                    text_auto=",.2f", color="Current_Value_PLN",
+                    color_continuous_scale="blues"
+                )
+                fig_bar.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)")
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+        # --- TABELA ---
+        st.subheader("📋 Szczegóły Twoich Pozycji")
+        if not final_portfolio.empty:
+            st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], use_container_width=True)
+
+    else:
+        st.error(f"Błąd pobierania raportu. Status: {response.status_code}")
+
+except Exception as e:
+    st.error("💥 Wystąpił błąd podczas generowania dashboardu.")
+    st.exception(e)
