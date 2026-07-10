@@ -121,14 +121,56 @@ def calculate_cash_stats(df: pd.DataFrame) -> dict:
         "interest": interest + interest_tax
     }
 
-@st.cache_data(ttl=3600)
-def generate_real_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
+def generate_fast_timeline(df: pd.DataFrame, current_portfolio_value: float) -> pd.DataFrame:
+    """Generates a reliable timeline without heavy external web scraping."""
     df_sorted = df.copy()
     df_sorted["Time"] = pd.to_datetime(df_sorted["Time"]).dt.date
     df_sorted = df_sorted.sort_values(by="Time")
     
-    start_date = df_sorted["Time"].min()
-    end_date = df_sorted["Time"].max()
-    all_days = pd.date_range(start=start_date, end=end_date).date
+    daily = df_sorted.groupby("Time").agg(
+        Daily_Amount=("Amount", "sum"),
+        Daily_Deposits=("Amount", lambda x: x[df_sorted.loc[x.index, "Type"].isin(["Deposit", "Transfer"])].sum())
+    ).reset_index()
     
-    asset_types = ["Stock purchase", "Stock sell"]
+    daily["Wpłaty Rzeczywiste (Wkład)"] = daily["Daily_Deposits"].cumsum()
+    # Szacowana wartość oparta na bilansie księgowym wpłat/wypłat i transakcji
+    daily["Wartość Księgowa Portfela"] = daily["Daily_Amount"].cumsum()
+    
+    # Żeby wykres kończył się aktualną wyceną rynkową:
+    if not daily.empty:
+        daily.loc[daily.index[-1], "Całkowita Wartość Portfela"] = current_portfolio_value + (daily.loc[daily.index[-1], "Wartość Księgowa Portfela"] - daily.loc[daily.index[-1], "Wpłaty Rzeczywiste (Wkład)"])
+        daily["Całkowita Wartość Portfela"] = daily["Całkowita Wartość Portfela"].fillna(daily["Wartość Księgowa Portfela"])
+    else:
+        daily["Całkowita Wartość Portfela"] = daily["Wartość Księgowa Portfela"]
+        
+    return daily
+
+# --- UI EXECUTION FLOW ---
+try:
+    GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
+    DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
+
+    with st.spinner("Pobieranie i błyskawiczna analiza danych..."):
+        response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
+
+    if response.status_code == 200:
+        raw_df = pd.read_excel(io.BytesIO(response.content), skiprows=4)
+        raw_df.columns = raw_df.columns.str.strip()
+        clean_df = raw_df.dropna(subset=["ID"])
+
+        base_portfolio, realized_pnl = calculate_accurate_portfolio(clean_df)
+        final_portfolio = fetch_market_and_fx_data(base_portfolio)
+        cash = calculate_cash_stats(clean_df)
+        
+        total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
+        timeline_df = generate_fast_timeline(clean_df, total_value_stocks)
+
+        total_gain_pln = (total_value_stocks + cash["dividends"] + cash["interest"] + realized_pnl) - cash["deposits"]
+        roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
+
+        # --- PANEL METRYK ---
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Wycena Akcji (PLN)", f"{total_value_stocks:,.2f} zł")
+        col2.metric("Suma Twoich Wpłat", f"{cash['deposits']:,.2f} zł")
+        col3.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
+        col
