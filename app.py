@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # --- SET CONFIGURATION ---
 st.set_page_config(page_title="XTB Dashboard", page_icon="💰", layout="wide")
 
-st.title("💰 Prywatny Dashboard Finansowy XTB")
+st.title("💰 :rat: Szczur Dashboard :rat: 💰")
 st.markdown("---")
 
 # --- BACKEND LOGIC ---
