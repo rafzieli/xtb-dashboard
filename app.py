@@ -42,7 +42,6 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
     trade_df["Price"] = [x[1] if x is not None else None for x in parsed_data]
     
-    # 1. KALKULACJA AKTYWNEGO PORTFELA
     portfolio = trade_df.groupby("Ticker").agg(
         Shares_Owned=("Volume_Adjusted", "sum"),
         Net_Cash_Flow=("Amount", "sum")
@@ -51,17 +50,10 @@ def calculate_accurate_portfolio(df: pd.DataFrame) -> tuple:
     active_portfolio = portfolio[portfolio["Shares_Owned"] > 0].copy()
     active_portfolio["Total_Invested_Raw"] = -active_portfolio["Net_Cash_Flow"]
     
-    # 2. KALKULACJA ZREALIZOWANEGO ZYSKU (ZAMKNIĘTE POZYCJE)
-    # Zrealizowany zysk to suma wyciągniętej gotówki ze spółek, których już nie mamy 
-    # LUB nadwyżka gotówki ze sprzedaży częściowej
     realized_df = portfolio[portfolio["Shares_Owned"] <= 0].copy()
     realized_pnl = realized_df["Net_Cash_Flow"].sum() if not realized_df.empty else 0.0
     
-    # Dodajemy też zysk z częściowego zamknięcia pozycji dla obecnie posiadanych
     for idx, row in portfolio[portfolio["Shares_Owned"] > 0].iterrows():
-        ticker = row["Ticker"]
-        # Jeśli Net_Cash_Flow dla posiadanej spółki jest dodatni, oznacza to, że ze sprzedaży 
-        # odzyskaliśmy już więcej niż włożyliśmy pierwotnie (częściowy zrealizowany zysk)
         if row["Net_Cash_Flow"] > 0:
             realized_pnl += row["Net_Cash_Flow"]
 
@@ -87,10 +79,7 @@ def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
         try:
             t = yf.Ticker(y_ticker)
             hist = t.history(period="1d", timeout=3)
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
-            else:
-                price = t.info.get("previousClose") or t.info.get("regularMarketPrice")
+            price = hist["Close"].iloc[-1] if not hist.empty else t.info.get("previousClose")
             currency = t.info.get("currency", "USD")
             if price is not None and currency in ["ILA", "GBX"] and y_ticker.endswith(".WA"):
                 price /= 100.0
@@ -112,10 +101,7 @@ def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
             fx_ticker = f"{curr}PLN=X"
             t_fx = yf.Ticker(fx_ticker)
             hist_fx = t_fx.history(period="1d", timeout=3)
-            if not hist_fx.empty:
-                fx_rates[curr] = float(hist_fx["Close"].iloc[-1])
-            else:
-                fx_rates[curr] = 4.00 if curr == "USD" else 4.30
+            fx_rates[curr] = float(hist_fx["Close"].iloc[-1]) if not hist_fx.empty else (4.00 if curr == "USD" else 4.30)
         except:
             fx_rates[curr] = 4.00 if curr == "USD" else 4.30
 
@@ -135,32 +121,94 @@ def calculate_cash_stats(df: pd.DataFrame) -> dict:
         "interest": interest + interest_tax
     }
 
-def generate_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
-    """Generates a day-by-day timeline of total deposits vs total portfolio cash balance."""
+@st.cache_data(ttl=3600)
+def generate_real_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
+    """Generates a day-by-day timeline reconstructing cash + actual historical stock values."""
     df_sorted = df.copy()
-    # Konwersja czasu do formatu samej daty (dzień)
     df_sorted["Time"] = pd.to_datetime(df_sorted["Time"]).dt.date
     df_sorted = df_sorted.sort_values(by="Time")
     
-    # Grupowanie dzienne transakcji
-    daily_changes = df_sorted.groupby("Time").agg(
-        Daily_Amount=("Amount", "sum"),
-        Daily_Deposits=("Amount", lambda x: x[df_sorted.loc[x.index, "Type"].isin(["Deposit", "Transfer"])].sum())
-    ).reset_index()
+    start_date = df_sorted["Time"].min()
+    end_date = df_sorted["Time"].max()
+    all_days = pd.date_range(start=start_date, end=end_date).date
     
-    # Sortowanie i liczenie sumy kumulacyjnej (timeline dzień po dniu)
-    daily_changes = daily_changes.sort_values(by="Time")
-    daily_changes["Wpłaty Rzeczywiste (Skumulowane)"] = daily_changes["Daily_Deposits"].cumsum()
-    daily_changes["Wartość Portfela (Stan Konta)"] = daily_changes["Daily_Amount"].cumsum()
+    # Wyciągamy ruchy akcji dzień po dniu
+    asset_types = ["Stock purchase", "Stock sell"]
+    trade_df = df_sorted[df_sorted["Type"].isin(asset_types)].copy()
     
-    return daily_changes
+    parsed_data = trade_df.apply(parse_xtb_comment, axis=1)
+    trade_df["Volume_Adjusted"] = [x[0] if x is not None else None for x in parsed_data]
+    trade_df["Yahoo_Ticker"] = trade_df["Ticker"].apply(fix_ticker_for_yahoo)
+    
+    unique_tickers = trade_df["Yahoo_Ticker"].dropna().unique()
+    
+    # Pobieramy ceny historyczne ze wszystich dni dla wykresu
+    historical_prices = {}
+    if len(unique_tickers) > 0:
+        try:
+            hist_data = yf.download(list(unique_tickers), start=start_date, end=end_date + pd.Timedelta(days=1), group_by='ticker', progress=False)
+            for ticker in unique_tickers:
+                if len(unique_tickers) == 1:
+                    historical_prices[ticker] = hist_data["Close"]
+                else:
+                    historical_prices[ticker] = hist_data[ticker]["Close"]
+        except:
+            pass
+
+    timeline_records = []
+    
+    # Rekonstrukcja pętli dzień po dniu
+    for current_day in all_days:
+        # 1. Obliczanie wolnej gotówki na ten konkretny dzień
+        sub_df = df_sorted[df_sorted["Time"] <= current_day]
+        cash_balance = sub_df["Amount"].sum()
+        
+        # 2. Obliczanie sumy wpłat do tego dnia
+        total_deposits = sub_df[sub_df["Type"].isin(["Deposit", "Transfer"])]["Amount"].sum()
+        
+        # 3. Obliczanie wartości akcji na ten dzień
+        sub_trades = trade_df[trade_df["Time"] <= current_day]
+        stock_value_pln = 0.0
+        
+        if not sub_trades.empty:
+            shares_per_ticker = sub_trades.groupby("Yahoo_Ticker")["Volume_Adjusted"].sum()
+            for t_symbol, shares in shares_per_ticker.items():
+                if shares > 0:
+                    price = None
+                    if t_symbol in historical_prices:
+                        # Próbujemy znaleźć najbliższą cenę zamknięcia z przeszłości (pomijamy weekendy)
+                        available_prices = historical_prices[t_symbol][:current_day]
+                        if not available_prices.empty:
+                            price = available_prices.iloc[-1]
+                    
+                    if pd.isna(price) or price is None:
+                        # fallback do ceny transakcji
+                        price = sub_trades[sub_trades["Yahoo_Ticker"] == t_symbol]["Price"].iloc[-1]
+                    
+                    # Prosty przelicznik walutowy (uproszczony dla historii)
+                    fx_rate = 1.0
+                    if t_symbol.endswith(".US"): fx_rate = 4.00
+                    elif not t_symbol.endswith(".WA"): fx_rate = 4.30
+                    
+                    stock_value_pln += shares * price * fx_rate
+                    
+        # Całkowita wartość = wolna gotówka + wartość rynkowa posiadanych akcji
+        total_portfolio_value = cash_balance + stock_value_pln
+        
+        timeline_records.append({
+            "Time": current_day,
+            "Wpłaty Rzeczywiste (Wkład)": total_deposits,
+            "Całkowita Wartość Portfela": total_portfolio_value
+        })
+        
+    return pd.DataFrame(timeline_records)
 
 # --- UI EXECUTION FLOW ---
 try:
     GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
     DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
 
-    with st.spinner("Pobieranie i analizowanie danych portfela..."):
+    with st.spinner("Pobieranie i precyzyjna analiza osi czasu Twojego portfela..."):
         response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
 
     if response.status_code == 200:
@@ -168,86 +216,18 @@ try:
         raw_df.columns = raw_df.columns.str.strip()
         clean_df = raw_df.dropna(subset=["ID"])
 
-        # Obliczenia
+        # Obliczenia bazowe
         base_portfolio, realized_pnl = calculate_accurate_portfolio(clean_df)
         final_portfolio = fetch_market_and_fx_data(base_portfolio)
         cash = calculate_cash_stats(clean_df)
-        timeline_df = generate_historical_timeline(clean_df)
+        timeline_df = generate_real_historical_timeline(clean_df)
 
         # Globalne Metryki
         total_value_stocks = final_portfolio["Current_Value_PLN"].sum() if not final_portfolio.empty else 0.0
-        # Łączny zysk (Wycena akcji + zainkasowana kasa z dywidend/odsetek/zamkniętych pozycji) minus to co wpłaciliśmy
         total_gain_pln = (total_value_stocks + cash["dividends"] + cash["interest"] + realized_pnl) - cash["deposits"]
         roi = (total_gain_pln / cash["deposits"]) * 100 if cash["deposits"] > 0 else 0
 
-        # --- PANEL METRYK (5 KOLUMN) ---
+        # --- PANEL METRYK ---
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("Wycena Akcji (PLN)", f"{total_value_stocks:,.2f} zł")
-        col2.metric("Suma Twoich Wpłat", f"{cash['deposits']:,.2f} zł")
-        col3.metric("Zrealizowany Zysk 🟢", f"{realized_pnl:,.2f} zł")
-        col4.metric("Dywidendy + Odsetki", f"{(cash['dividends'] + cash['interest']):,.2f} zł")
-        col5.metric("Niezrealizowany Zysk / Strata", f"{total_gain_pln:,.2f} zł", delta=f"{roi:.2f}%")
-
-        st.markdown("---")
-
-        # --- NOWY WYKRES: LINIA CZASU (WPŁATY VS WARTOŚĆ) ---
-        st.subheader("📈 Zmiana wartości portfela w czasie vs Wpłaty rzeczywiste")
-        
-        fig_line = go.Figure()
-        fig_line.add_trace(go.Scatter(
-            x=timeline_df["Time"], y=timeline_df["Wpłaty Rzeczywiste (Skumulowane)"],
-            mode='lines', name='Wpłaty Rzeczywiste (Wkład)',
-            line=dict(color='rgba(150, 150, 150, 0.8)', width=2, dash='dash')
-        ))
-        fig_line.add_trace(go.Scatter(
-            x=timeline_df["Time"], y=timeline_df["Wartość Portfela (Stan Konta)"],
-            mode='lines', name='Całkowita Wartość Portfela',
-            line=dict(color='#2ca02c', width=3)
-        ))
-        
-        fig_line.update_layout(
-            hovermode="x unified",
-            xaxis_title="Data",
-            yaxis_title="Wartość (PLN)",
-            template="plotly_white",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
-
-        st.markdown("---")
-
-        # --- WYKRESY STRUKTURY ---
-        chart_col1, chart_col2 = st.columns(2)
-        with chart_col1:
-            st.subheader("Struktura Portfela")
-            if not final_portfolio.empty:
-                fig_pie = px.pie(final_portfolio, values="Current_Value_PLN", names="Ticker", hole=0.4,
-                                 color_discrete_sequence=px.colors.sequential.RdBu)
-                st.plotly_chart(fig_pie, use_container_width=True)
-            else:
-                st.info("Brak aktywnych pozycji do wyświetlenia na wykresie kołowym.")
-
-        with chart_col2:
-            st.subheader("Wartość Pozycji w PLN")
-            if not final_portfolio.empty:
-                fig_bar = px.bar(final_portfolio.sort_values(by="Current_Value_PLN", ascending=True), 
-                                 x="Current_Value_PLN", y="Ticker", orientation="h",
-                                 text_auto=",.2f", color="Current_Value_PLN",
-                                 color_continuous_scale=px.colors.sequential.Viridis)
-                st.plotly_chart(fig_bar, use_container_width=True)
-            else:
-                st.info("Brak aktywnych pozycji do wyświetlenia na wykresie słupkowym.")
-
-        # --- TABELA ---
-        st.subheader("📋 Szczegóły Twoich Pozycji")
-        if not final_portfolio.empty:
-            st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], use_container_width=True)
-        else:
-            st.info("Brak otwartych pozycji.")
-
-    else:
-        st.error(f"Błąd Dysku Google. Status: {response.status_code}")
-
-except Exception as e:
-    st.error("💥 Wystąpił błąd podczas generowania rozszerzonego dashboardu.")
-    st.exception(e)
+        col2.
