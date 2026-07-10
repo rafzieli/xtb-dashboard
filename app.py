@@ -105,8 +105,8 @@ def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     return xtb_ticker
 
 @st.cache_data(ttl=1800)
-ef fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
-    if dportfolio_df.empty: return portfolio_df
+def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
+    if portfolio_df.empty: return portfolio_df
     updated_portfolio = portfolio_df.copy()
     updated_portfolio["Yahoo_Ticker"] = updated_portfolio["Ticker"].apply(fix_ticker_for_yahoo)
     
