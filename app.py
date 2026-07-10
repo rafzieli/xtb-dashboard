@@ -15,12 +15,6 @@ logger = logging.getLogger(__name__)
 # --- SET CONFIGURATION ---
 st.set_page_config(page_title="XTB Dashboard", page_icon="💰", layout="wide")
 
-with st.sidebar:
-    st.header("⚙️ Ustawienia")
-    if st.button("🚀 Wymuś pełny restart"):
-        st.cache_data.clear()
-        st.rerun()
-
 st.title("💰 :rat: Szczur Dashboard :rat: 💰")
 st.markdown("---")
 
@@ -111,35 +105,28 @@ def fix_ticker_for_yahoo(xtb_ticker: str) -> str:
     return xtb_ticker
 
 @st.cache_data(ttl=1800)
+@st.cache_data(ttl=1800) # Wydłużamy TTL do 30 min, żeby apka nie mielił ciągle
 def fetch_market_and_fx_data(portfolio_df: pd.DataFrame):
     if portfolio_df.empty: return portfolio_df
     updated_portfolio = portfolio_df.copy()
     updated_portfolio["Yahoo_Ticker"] = updated_portfolio["Ticker"].apply(fix_ticker_for_yahoo)
     
-    current_prices, currencies = {}, {}
-    tickers_to_fetch = updated_portfolio["Yahoo_Ticker"].unique()
+    tickers = updated_portfolio["Yahoo_Ticker"].unique().tolist()
     
-    for y_ticker in tickers_to_fetch:
+    # POBIERANIE ZBIORCZE - Zamiast pętli!
+    data = yf.download(tickers, period="1d", group_by='ticker', threads=True, progress=False)
+    
+    current_prices = {}
+    for t in tickers:
         try:
-            t = yf.Ticker(y_ticker)
-            hist = t.history(period="1d", timeout=3)
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
-            else:
-                price = t.info.get("previousClose") or t.info.get("regularMarketPrice")
-            currency = t.info.get("currency", "USD")
-            if price is not None and currency in ["ILA", "GBX"] and y_ticker.endswith(".WA"):
-                price /= 100.0
-                currency = "PLN"
-            current_prices[y_ticker] = price
-            currencies[y_ticker] = currency
-        except Exception as e:
-            logger.error(f"Error fetching {y_ticker}: {e}")
-            current_prices[y_ticker], currencies[y_ticker] = None, "USD"
+            # Obsługa różnej struktury danych przy 1 vs wielu tickerach
+            ticker_data = data[t] if len(tickers) > 1 else data
+            price = ticker_data["Close"].iloc[-1]
+            current_prices[t] = float(price)
+        except:
+            current_prices[t] = 0.0
 
     updated_portfolio["Current_Price"] = updated_portfolio["Yahoo_Ticker"].map(current_prices)
-    updated_portfolio["Asset_Currency"] = updated_portfolio["Yahoo_Ticker"].map(currencies).fillna("USD")
-    updated_portfolio["Current_Value_Native"] = updated_portfolio["Shares_Owned"] * updated_portfolio["Current_Price"]
     
     unique_currencies = set(updated_portfolio["Asset_Currency"].dropna().unique()) - {"PLN"}
     fx_rates = {"PLN": 1.0}
@@ -270,7 +257,7 @@ try:
     DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
 
     with st.spinner("Przetwarzanie pełnego portfela (PLN + US)..."):
-        response = requests.get(DRIVE_DOWNLOAD_URL, timeout=10)
+        response = requests.get(DRIVE_DOWNLOAD_URL, timeout=30)
 
     if response.status_code == 200:
         raw_df = pd.read_excel(io.BytesIO(response.content), skiprows=4, skipfooter=1)
@@ -311,7 +298,7 @@ try:
         with row2_col4:
             st.write("") # Dwa wolne wiersze, żeby wyrównać przycisk w dół do poziomu metryk
             st.write("")
-            if st.button("🔄 Odśwież dane", use_container_width=True):
+            if st.button("🔄 Odśwież dane", width='stretch'):
                 st.cache_data.clear() # Czyszczenie pamięci podręcznej (wymusi ponowne pobranie z Drive / Yahoo)
                 st.rerun()           # Przeładowanie skryptu
 
@@ -339,7 +326,7 @@ try:
             template="plotly_white",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        st.plotly_chart(fig_line, use_container_width=True)
+        st.plotly_chart(fig_line, width='stretch')
 
         st.markdown("---")
 
@@ -350,7 +337,7 @@ try:
             if not final_portfolio.empty:
                 fig_pie = px.pie(final_portfolio, values="Current_Value_PLN", names="Ticker", hole=0.4,
                                  color_discrete_sequence=px.colors.sequential.RdBu)
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(fig_pie, width='stretch')
 
         with chart_col2:
             st.subheader("Wartość Pozycji w PLN")
@@ -359,12 +346,12 @@ try:
                                  x="Current_Value_PLN", y="Ticker", orientation="h",
                                  text_auto=",.2f", color="Current_Value_PLN",
                                  color_continuous_scale=px.colors.sequential.Viridis)
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_bar, width='stretch')
 
         # --- TABELA ---
         st.subheader("📋 Szczegóły Twoich Pozycji")
         if not final_portfolio.empty:
-            st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], use_container_width=True)
+            st.dataframe(final_portfolio[["Ticker", "Shares_Owned", "Asset_Currency", "Current_Price", "Current_Value_PLN"]], width='stretch')
 
     else:
         st.error(f"Błąd Dysku Google. Status: {response.status_code}")
