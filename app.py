@@ -260,7 +260,7 @@ def generate_weekly_historical_timeline(df: pd.DataFrame) -> pd.DataFrame:
 
 # --- UI EXECUTION FLOW ---
 try:
-    GOOGLE_DRIVE_FILE_ID = "1icRPA0GdmAXU-U-WF_65QD1RxAfSc8oH"
+    GOOGLE_DRIVE_FILE_ID = "1tZZv06hpZRKQawQSjZ86n81l6H7BiP1T"
     DRIVE_DOWNLOAD_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_DRIVE_FILE_ID}/export?format=xlsx"
 
     with st.spinner("Przetwarzanie pełnego portfela (PLN + US)..."):
